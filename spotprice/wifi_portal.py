@@ -16,8 +16,10 @@ from .config import BLACK, WHITE, ACCENT, GRAY, AP_SSID, AP_IP
 try:
     from adafruit_display_text import label
     import terminalio
+
     try:
         from adafruit_bitmap_font import bitmap_font
+
         FONT = bitmap_font.load_font("/font.bdf")
     except Exception:
         FONT = terminalio.FONT
@@ -28,6 +30,7 @@ except ImportError:
 
 try:
     import adafruit_miniqr
+
     HAS_QR = True
 except ImportError:
     HAS_QR = False
@@ -65,25 +68,25 @@ def make_qr_bitmap(data, scale=2):
     """Generate a QR code bitmap from the given data string."""
     if not HAS_QR:
         return None, None
-    
+
     qr = adafruit_miniqr.QRCode(qr_type=3)
     qr.add_data(data.encode("utf-8"))
     qr.make()
-    
+
     matrix = qr.matrix
     size = matrix.width
     bitmap = displayio.Bitmap(size * scale, size * scale, 2)
     palette = displayio.Palette(2)
     palette[0] = WHITE
     palette[1] = BLACK
-    
+
     for y in range(size):
         for x in range(size):
             color = 1 if matrix[x, y] else 0
             for sy in range(scale):
                 for sx in range(scale):
                     bitmap[x * scale + sx, y * scale + sy] = color
-    
+
     return bitmap, palette
 
 
@@ -95,7 +98,7 @@ def url_decode(encoded_string):
         char = encoded_string[i]
         if char == "%" and i + 2 < len(encoded_string):
             try:
-                result.append(chr(int(encoded_string[i + 1:i + 3], 16)))
+                result.append(chr(int(encoded_string[i + 1 : i + 3], 16)))
                 i += 3
                 continue
             except ValueError:
@@ -125,7 +128,7 @@ def build_setup_html(networks=None):
     if networks:
         for ssid, rssi in networks:
             network_options += f'<option value="{ssid}">{ssid}</option>\n'
-    
+
     network_select = ""
     if network_options:
         network_select = f"""
@@ -133,7 +136,7 @@ def build_setup_html(networks=None):
             <option value="">-- Select a network --</option>
             {network_options}
         </select>"""
-    
+
     return f"""<!DOCTYPE html>
 <html>
 <head>
@@ -210,11 +213,14 @@ ERROR_HTML = """<!DOCTYPE html>
 
 # Captive portal detection paths
 CAPTIVE_PORTAL_PATHS = {
-    "/generate_204", "/gen_204",
+    "/generate_204",
+    "/gen_204",
     "/hotspot-detect.html",
     "/library/test/success.html",
-    "/ncsi.txt", "/connecttest.txt",
-    "/redirect", "/success.txt",
+    "/ncsi.txt",
+    "/connecttest.txt",
+    "/redirect",
+    "/success.txt",
     "/canonical.html",
 }
 
@@ -222,10 +228,12 @@ CAPTIVE_PORTAL_PATHS = {
 def save_credentials(ssid, password):
     """Write WiFi creds to settings.toml. Returns True on success."""
     import storage
-    
-    content = f'CIRCUITPY_WIFI_SSID = "{ssid}"\nCIRCUITPY_WIFI_PASSWORD = "{password}"\n'
+
+    content = (
+        f'CIRCUITPY_WIFI_SSID = "{ssid}"\nCIRCUITPY_WIFI_PASSWORD = "{password}"\n'
+    )
     print(f"Saving: {ssid}")
-    
+
     try:
         with open("/settings.toml", "w") as f:
             f.write(content)
@@ -239,32 +247,33 @@ def save_credentials(ssid, password):
 def run_setup_portal(disp):
     """Run the WiFi captive portal for configuration."""
     ap_password = generate_password()
-    
+
     # Set up display
     group = displayio.Group()
     disp.root_group = group
-    
+
     # Black background
     bg = displayio.Bitmap(disp.width, disp.height, 1)
     bg_pal = displayio.Palette(1)
     bg_pal[0] = BLACK
     group.append(displayio.TileGrid(bg, pixel_shader=bg_pal))
-    
+
     # Show QR code for WiFi connection
     wifi_qr = f"WIFI:T:WPA;S:{AP_SSID};P:{ap_password};;"
     qr_bmp, qr_pal = make_qr_bitmap(wifi_qr, scale=4)
-    
+
     if qr_bmp and HAS_DISPLAY_TEXT:
         qr_y = (disp.height - qr_bmp.height) // 2
         group.append(displayio.TileGrid(qr_bmp, pixel_shader=qr_pal, x=10, y=qr_y))
-        
+
         rx = disp.width - 60
+
         def add_lbl(txt, y, color, scale=1):
             lbl = label.Label(FONT, text=txt, color=color, scale=scale)
             lbl.anchor_point = (0.5, 0.0)
             lbl.anchored_position = (rx, y)
             group.append(lbl)
-        
+
         add_lbl("WiFi Setup", 5, ACCENT, 1)
         add_lbl("Scan QR", 28, WHITE)
         add_lbl("to connect", 46, WHITE)
@@ -275,11 +284,11 @@ def run_setup_portal(disp):
     # Scan networks and start access point
     networks = scan_networks()
     setup_html = build_setup_html(networks)
-    
+
     wifi.radio.stop_station()
     wifi.radio.start_ap(ssid=AP_SSID, password=ap_password)
     print(f"AP: {AP_SSID} @ {wifi.radio.ipv4_address_ap}")
-    
+
     # Start HTTP server
     pool = socketpool.SocketPool(wifi.radio)
     sock = pool.socket(pool.AF_INET, pool.SOCK_STREAM)
@@ -287,39 +296,40 @@ def run_setup_portal(disp):
     sock.bind(("0.0.0.0", 80))
     sock.listen(1)
     sock.setblocking(False)
-    
+
     client_seen = False
-    
+
     def show_portal_qr():
         """Switch display to show portal URL QR after client connects."""
         nonlocal client_seen
         if client_seen:
             return
         client_seen = True
-        
+
         while len(group) > 1:
             group.pop()
-        
+
         url_qr = f"http://{AP_IP}/setup"
         qr2, pal2 = make_qr_bitmap(url_qr, scale=4)
         if qr2 and HAS_DISPLAY_TEXT:
             qr_y = (disp.height - qr2.height) // 2
             group.append(displayio.TileGrid(qr2, pixel_shader=pal2, x=10, y=qr_y))
-            
+
             rx = disp.width - 60
+
             def add_lbl(txt, y, color, scale=1):
                 lbl = label.Label(FONT, text=txt, color=color, scale=scale)
                 lbl.anchor_point = (0.5, 0.0)
                 lbl.anchored_position = (rx, y)
                 group.append(lbl)
-            
+
             add_lbl("Connected!", 5, ACCENT, 1)
             add_lbl("Scan QR", 28, WHITE)
             add_lbl("to open", 46, WHITE)
             add_lbl("setup page", 64, WHITE)
             add_lbl("-- or --", 86, GRAY)
             add_lbl(AP_IP, 106, ACCENT)
-    
+
     # Server loop
     while True:
         if not client_seen:
@@ -328,39 +338,39 @@ def run_setup_portal(disp):
                     show_portal_qr()
             except:
                 pass
-        
+
         try:
             client, addr = sock.accept()
             client.setblocking(True)
             client.settimeout(5.0)
             show_portal_qr()
-            
+
             buf = bytearray(4096)
             try:
                 n = client.recv_into(buf)
-                req = buf[:n].decode('utf-8')
-                
-                first_line = req.split('\r\n')[0]
-                parts = first_line.split(' ')
+                req = buf[:n].decode("utf-8")
+
+                first_line = req.split("\r\n")[0]
+                parts = first_line.split(" ")
                 if len(parts) >= 2:
                     method, path = parts[0], parts[1]
-                    
+
                     if path in CAPTIVE_PORTAL_PATHS or path == "/":
                         resp = f"HTTP/1.1 302 Found\r\nLocation: http://{AP_IP}/setup\r\nContent-Length: 0\r\n\r\n"
                         client.send(resp.encode())
-                    
+
                     elif path == "/setup":
                         resp = f"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {len(setup_html)}\r\n\r\n{setup_html}"
                         client.sendall(resp.encode())
-                    
+
                     elif method == "POST" and path == "/save":
-                        body_start = req.find('\r\n\r\n')
+                        body_start = req.find("\r\n\r\n")
                         if body_start > 0:
-                            body = req[body_start + 4:]
+                            body = req[body_start + 4 :]
                             params = parse_form_data(body)
-                            ssid = params.get('ssid', '')
-                            pw = params.get('password', '')
-                            
+                            ssid = params.get("ssid", "")
+                            pw = params.get("password", "")
+
                             if ssid:
                                 ok = save_credentials(ssid, pw)
                                 html = SUCCESS_HTML if ok else ERROR_HTML
@@ -374,14 +384,14 @@ def run_setup_portal(disp):
                     else:
                         resp = f"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {len(setup_html)}\r\n\r\n{setup_html}"
                         client.sendall(resp.encode())
-                        
+
             except Exception as e:
                 print(f"Request error: {e}")
             finally:
                 client.close()
-                
+
         except OSError as e:
             if e.errno != 11:
                 print(f"Server error: {e}")
-        
+
         time.sleep(0.1)

@@ -4,16 +4,16 @@ Configuration constants for SpotPrice Display.
 
 # API
 API_URL = "https://api.porssisahko.net/v2/latest-prices.json"
-RETRY_INTERVAL = 30     # 30 seconds on error
+RETRY_INTERVAL = 30  # 30 seconds on error
 
 # Access Point
 AP_SSID = "SpotPrice"
 AP_IP = "192.168.4.1"
 
 # Display
-GRAPH_SLOTS_8H = 32      # Number of 15-min slots for 8-hour view (32 = 8 hours)
-GRAPH_SLOTS_24H = 96     # Number of 15-min slots for 24-hour view (96 = 24 hours)
-DISPLAY_REFRESH = 120    # Check for price changes (prices update every 15 min)
+GRAPH_SLOTS_8H = 32  # Number of 15-min slots for 8-hour view (32 = 8 hours)
+GRAPH_SLOTS_24H = 96  # Number of 15-min slots for 24-hour view (96 = 24 hours)
+DISPLAY_REFRESH = 120  # Check for price changes (prices update every 15 min)
 DISPLAY_BRIGHTNESS = 0.5  # 0.0-1.0 (lower = less power, longer battery life)
 
 # Fetch schedule (hours in UTC)
