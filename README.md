@@ -69,7 +69,7 @@ chmod +x install.sh
 
 | Main Display | Forecast View | Setup Screen |
 |--------------|---------------|--------------|
-| ![Price Display](images/price_display.jpeg) | ![Forecast](images/forecast.jpeg)![Forecast](images/forecast8.jpeg) | ![Setup](images/connect-to-wifi.jpeg) ![Setup](images/setup.jpeg) |
+| ![Price Display](images/price_display.jpeg) ![Price Display](images/price_display1.jpeg) | ![Forecast](images/forecast.jpeg)![Forecast](images/forecast8.jpeg) | ![Setup](images/connect-to-wifi1.jpeg) ![Setup](images/setup.jpeg) |
 
 ## Installation
 
