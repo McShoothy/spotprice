@@ -120,7 +120,7 @@ circup install --auto
 ```
 CIRCUITPY/
     boot.py
-    code.py
+    main.py
     spotprice/        (folder)
     font.bdf          (optional, custom font)
     settings.toml     (created automatically during setup)
@@ -252,7 +252,7 @@ This project uses the [Porssisahko API](https://porssisahko.net/) for Finnish el
 ```
 esp32-s3/
     boot.py           # Filesystem config (hold D0 during boot for USB access)
-    code.py           # Main application entry point
+    main.py           # Main application entry point
     settings.toml     # WiFi credentials (auto-generated)
     font.bdf          # Custom font (optional)
     spotprice/        # Application modules

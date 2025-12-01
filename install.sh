@@ -93,8 +93,8 @@ echo -e "${YELLOW}[4/4]${NC} Copying files to device..."
 cp "$SCRIPT_DIR/boot.py" "$DEVICE_PATH/"
 echo -e "  ${GREEN}✓${NC} boot.py"
 
-cp "$SCRIPT_DIR/code.py" "$DEVICE_PATH/"
-echo -e "  ${GREEN}✓${NC} code.py"
+cp "$SCRIPT_DIR/main.py" "$DEVICE_PATH/"
+echo -e "  ${GREEN}✓${NC} main.py"
 
 # Copy spotprice module
 if [ -d "$SCRIPT_DIR/spotprice" ]; then
