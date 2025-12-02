@@ -2,7 +2,7 @@
 
 A real-time Finnish electricity spot price monitor built with CircuitPython for the Adafruit ESP32-S3 TFT Feather. Displays current electricity prices with color-coded backgrounds and 8-hour/24-hour forecast graphs.
 
-![CI](https://github.com/McShoothy/spotprice/actions/workflows/ci.yml/badge.svg) ![License: CC BY-NC 4.0](https://img.shields.io/badge/License-CC%20BY--NC%204.0-blue) ![CircuitPython](https://img.shields.io/badge/CircuitPython-9.x-purple)
+![CI](https://github.com/McShoothy/spotprice/actions/workflows/ci.yml/badge.svg) ![License: CC BY-NC 4.0](https://img.shields.io/badge/License-CC%20BY--NC%204.0-blue) ![CircuitPython](https://img.shields.io/badge/CircuitPython-10.x-purple)
 
 ![Device Photo](images/device.jpeg)
 (This image was taken before adding the new font)
@@ -11,9 +11,9 @@ A real-time Finnish electricity spot price monitor built with CircuitPython for 
 
 Get up and running in a couple of minutes.
 
-1) Flash CircuitPython 9.x for the ESP32-S3 TFT Feather
+1) Flash CircuitPython 10.x for the ESP32-S3 TFT Feather
 
-> Download the `.uf2` file from https://circuitpython.org/board/adafruit_feather_esp32s3_tft/
+> Download the `.uf2` file from [adafruit_feather_esp32s3_tft](https://circuitpython.org/board/adafruit_feather_esp32s3_reverse_tft/)
 
 > Double press the Reset button
 
