@@ -104,9 +104,19 @@ if [ -d "$SCRIPT_DIR/spotprice" ]; then
 fi
 
 # Copy font if exists
+# Copy font files if they exist
 if [ -f "$SCRIPT_DIR/font.bdf" ]; then
     cp "$SCRIPT_DIR/font.bdf" "$DEVICE_PATH/"
     echo -e "  ${GREEN}✓${NC} font.bdf"
+fi
+
+if [ -f "$SCRIPT_DIR/font.bmp" ]; then
+    cp "$SCRIPT_DIR/font.bmp" "$DEVICE_PATH/"
+    echo -e "  ${GREEN}✓${NC} font.bmp"
+fi
+
+if [ ! -f "$SCRIPT_DIR/font.bdf" ] && [ ! -f "$SCRIPT_DIR/font.bmp" ]; then
+    echo -e "  ${YELLOW}!${NC} No custom font found (will use default terminal font)"
 fi
 
 # Copy settings.toml template if no settings exist

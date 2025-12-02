@@ -53,6 +53,39 @@ title_label = None
 unit_label = None
 bg_palette = None
 
+# Reusable palettes to avoid memory fragmentation
+_graph_palettes = None
+
+
+def _init_graph_palettes():
+    """Initialize reusable palettes for graph drawing."""
+    global _graph_palettes
+    if _graph_palettes is None:
+        _graph_palettes = {
+            "min_line": displayio.Palette(1),
+            "max_line": displayio.Palette(1),
+            "fill_green": displayio.Palette(1),
+            "fill_yellow": displayio.Palette(1),
+            "fill_red": displayio.Palette(1),
+            "line_green": displayio.Palette(1),
+            "line_yellow": displayio.Palette(1),
+            "line_red": displayio.Palette(1),
+            "marker": displayio.Palette(1),
+            "now_line": displayio.Palette(1),
+            "tick": displayio.Palette(1),
+        }
+        _graph_palettes["min_line"][0] = 0x004400
+        _graph_palettes["max_line"][0] = 0x440000
+        _graph_palettes["fill_green"][0] = 0x003322
+        _graph_palettes["fill_yellow"][0] = 0x332200
+        _graph_palettes["fill_red"][0] = 0x330000
+        _graph_palettes["line_green"][0] = GREEN
+        _graph_palettes["line_yellow"][0] = YELLOW
+        _graph_palettes["line_red"][0] = RED
+        _graph_palettes["marker"][0] = WHITE
+        _graph_palettes["now_line"][0] = ACCENT
+        _graph_palettes["tick"][0] = GRAY
+
 
 def init_display():
     """Set up the main display groups and labels."""
@@ -149,6 +182,9 @@ def show_graph(prices, now_index=0):
     if not display or not HAS_DISPLAY_TEXT:
         return
 
+    # Initialize reusable palettes
+    _init_graph_palettes()
+
     price_group.hidden = True
     graph_group.hidden = False
 
@@ -156,6 +192,7 @@ def show_graph(prices, now_index=0):
     title_label.color = WHITE
     status_label.color = WHITE
 
+    # Clear old graph elements
     while len(graph_group) > 0:
         graph_group.pop()
 
@@ -186,8 +223,6 @@ def show_graph(prices, now_index=0):
     graph_height = graph_bottom - graph_top
 
     # Calculate scale
-    min_price = min(prices)
-    max_price = max(prices)
     price_range = max(max_price - min_price, 1.0)
     padding = price_range * 0.1
     min_price_display = max(0, min_price - padding)
@@ -198,11 +233,9 @@ def show_graph(prices, now_index=0):
     min_y = int(
         graph_bottom - ((min_price - min_price_display) / price_range) * graph_height
     )
-    min_line_pal = displayio.Palette(1)
-    min_line_pal[0] = 0x004400
     for x in range(graph_left, graph_right, 4):
         dash = vectorio.Rectangle(
-            pixel_shader=min_line_pal, width=2, height=1, x=x, y=min_y
+            pixel_shader=_graph_palettes["min_line"], width=2, height=1, x=x, y=min_y
         )
         graph_group.append(dash)
 
@@ -210,11 +243,9 @@ def show_graph(prices, now_index=0):
     max_y = int(
         graph_bottom - ((max_price - min_price_display) / price_range) * graph_height
     )
-    max_line_pal = displayio.Palette(1)
-    max_line_pal[0] = 0x440000
     for x in range(graph_left, graph_right, 4):
         dash = vectorio.Rectangle(
-            pixel_shader=max_line_pal, width=2, height=1, x=x, y=max_y
+            pixel_shader=_graph_palettes["max_line"], width=2, height=1, x=x, y=max_y
         )
         graph_group.append(dash)
 
@@ -232,20 +263,21 @@ def show_graph(prices, now_index=0):
         y = max(graph_top, min(graph_bottom, y))
         points.append((x, y))
 
-    # Draw filled area under curve
+    # Draw filled area under curve (use step > 1 to reduce object count)
     for i in range(len(points) - 1):
         x1, y1 = points[i]
         x2, y2 = points[i + 1]
 
         avg_price = (prices[i] + prices[i + 1]) / 2
         if avg_price < PRICE_MED:
-            fill_color = 0x003322
+            fill_pal = _graph_palettes["fill_green"]
         elif avg_price < PRICE_HIGH:
-            fill_color = 0x332200
+            fill_pal = _graph_palettes["fill_yellow"]
         else:
-            fill_color = 0x330000
+            fill_pal = _graph_palettes["fill_red"]
 
-        for x in range(x1, x2 + 1):
+        # Reduce fill density - only draw every 2nd pixel
+        for x in range(x1, x2 + 1, 2):
             if x2 != x1:
                 t = (x - x1) / (x2 - x1)
                 y = int(y1 + t * (y2 - y1))
@@ -253,10 +285,8 @@ def show_graph(prices, now_index=0):
                 y = y1
 
             if graph_bottom > y:
-                fill_pal = displayio.Palette(1)
-                fill_pal[0] = fill_color
                 line = vectorio.Rectangle(
-                    pixel_shader=fill_pal, width=1, height=graph_bottom - y, x=x, y=y
+                    pixel_shader=fill_pal, width=2, height=graph_bottom - y, x=x, y=y
                 )
                 graph_group.append(line)
 
@@ -267,18 +297,15 @@ def show_graph(prices, now_index=0):
 
         avg_price = (prices[i] + prices[i + 1]) / 2
         if avg_price < PRICE_MED:
-            line_color = GREEN
+            line_pal = _graph_palettes["line_green"]
         elif avg_price < PRICE_HIGH:
-            line_color = YELLOW
+            line_pal = _graph_palettes["line_yellow"]
         else:
-            line_color = RED
+            line_pal = _graph_palettes["line_red"]
 
         dx = x2 - x1
         dy = y2 - y1
         steps = max(abs(dx), abs(dy), 1)
-
-        line_pal = displayio.Palette(1)
-        line_pal[0] = line_color
 
         for step in range(steps + 1):
             t = step / steps if steps > 0 else 0
@@ -291,20 +318,24 @@ def show_graph(prices, now_index=0):
 
     # Draw current price marker at now_index position
     if points and now_index < len(points):
-        marker_pal = displayio.Palette(1)
-        marker_pal[0] = WHITE
         now_x, now_y = points[now_index]
         marker = vectorio.Rectangle(
-            pixel_shader=marker_pal, width=4, height=4, x=now_x - 2, y=now_y - 2
+            pixel_shader=_graph_palettes["marker"],
+            width=4,
+            height=4,
+            x=now_x - 2,
+            y=now_y - 2,
         )
         graph_group.append(marker)
 
         # Draw vertical "now" line
-        now_line_pal = displayio.Palette(1)
-        now_line_pal[0] = ACCENT
         for y_pos in range(graph_top, graph_bottom, 3):
             dot = vectorio.Rectangle(
-                pixel_shader=now_line_pal, width=1, height=2, x=now_x, y=y_pos
+                pixel_shader=_graph_palettes["now_line"],
+                width=1,
+                height=2,
+                x=now_x,
+                y=y_pos,
             )
             graph_group.append(dot)
 
@@ -340,10 +371,12 @@ def show_graph(prices, now_index=0):
             x_pos = int(graph_left + slot_index * x_step)
             future_hour = (current_hour + h) % 24
 
-            tick_pal = displayio.Palette(1)
-            tick_pal[0] = GRAY
             tick = vectorio.Rectangle(
-                pixel_shader=tick_pal, width=1, height=4, x=x_pos, y=graph_bottom
+                pixel_shader=_graph_palettes["tick"],
+                width=1,
+                height=4,
+                x=x_pos,
+                y=graph_bottom,
             )
             graph_group.append(tick)
 
@@ -351,6 +384,9 @@ def show_graph(prices, now_index=0):
             hour_lbl.anchor_point = (0.5, 0.0)
             hour_lbl.anchored_position = (x_pos, graph_bottom + 4)
             graph_group.append(hour_lbl)
+
+    # Clean up local reference
+    points = None
 
 
 def show_status(message):

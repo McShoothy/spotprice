@@ -15,6 +15,7 @@ License: CC BY-NC 4.0 (non-commercial use only)
 Repository: https://github.com/McShoothy/spotprice
 """
 
+import gc
 import time
 import ssl
 import os
@@ -113,6 +114,49 @@ def main():
     last_fetch_time = 0
     last_display_refresh = 0
     last_price_shown = None
+    last_gc_time = 0
+
+    def log_memory(label=""):
+        """Log current memory usage for debugging."""
+        gc.collect()
+        free = gc.mem_free()
+        alloc = gc.mem_alloc()
+        total = free + alloc
+        print(
+            f"[MEM {label}] Free: {free//1024}KB / {total//1024}KB ({100*free//total}%)"
+        )
+
+    def fetch_prices():
+        """Fetch price data from API with proper cleanup."""
+        nonlocal price_data
+
+        response = None
+        try:
+            wifi_on()
+            response = http.get(API_URL)
+            new_data = response.json()
+
+            # Explicitly clear old data before assigning new
+            if price_data is not None:
+                price_data.clear()
+                price_data = None
+            gc.collect()
+
+            price_data = new_data
+            return True
+        except Exception as e:
+            print(f"Fetch error: {e}")
+            return False
+        finally:
+            # Always clean up response
+            if response is not None:
+                try:
+                    response.close()
+                except Exception:
+                    pass
+                response = None
+            wifi_off()
+            gc.collect()
 
     def refresh_display():
         """Update the display based on current mode and data."""
@@ -173,28 +217,22 @@ def main():
                         break
 
         if should_fetch:
-            try:
-                show_status("Fetching prices...")
-                wifi_on()
-                response = http.get(API_URL)
-                price_data = response.json()
-                response.close()
-                wifi_off()
+            show_status("Fetching prices...")
+            if fetch_prices():
                 last_fetch_time = current_time
                 last_display_refresh = current_time
 
-                if "prices" in price_data:
+                if price_data and "prices" in price_data:
                     count = len(price_data["prices"])
                     print(
                         f"Cached {count} price entries at {current_hour:02d}:{current_min:02d}"
                     )
+                    log_memory("after fetch")
 
                 refresh_display()
                 show_status("")
-            except Exception as e:
-                print(f"Fetch error: {e}")
+            else:
                 show_status("Error")
-                wifi_off()
                 last_fetch_time = current_time - 3600 + RETRY_INTERVAL
 
         elif (current_time - last_display_refresh) > DISPLAY_REFRESH:
@@ -204,6 +242,11 @@ def main():
                 current_price = find_current_price(price_data["prices"])
                 if current_price != last_price_shown:
                     refresh_display()
+
+        # Periodic garbage collection (every 5 minutes)
+        if (current_time - last_gc_time) > 300:
+            last_gc_time = current_time
+            gc.collect()
 
         time.sleep(0.1)
 
