@@ -12,21 +12,7 @@ import microcontroller
 
 from .config import BLACK, WHITE, ACCENT, GRAY, AP_SSID, AP_IP
 
-# Optional dependencies
-try:
-    from adafruit_display_text import label
-    import terminalio
-
-    try:
-        from adafruit_bitmap_font import bitmap_font
-
-        FONT = bitmap_font.load_font("/font.bdf")
-    except Exception:
-        FONT = terminalio.FONT
-    HAS_DISPLAY_TEXT = True
-except ImportError:
-    HAS_DISPLAY_TEXT = False
-    FONT = None
+from .fonts import FONT, HAS_DISPLAY_TEXT, label
 
 try:
     import adafruit_miniqr
@@ -44,7 +30,11 @@ def generate_password(length=8):
 
 def needs_wifi_setup():
     """Check if WiFi credentials are configured."""
-    ssid = os.getenv("CIRCUITPY_WIFI_SSID")
+    try:
+        ssid = os.getenv("CIRCUITPY_WIFI_SSID")
+    except ValueError as e:  # malformed settings.toml: let the portal fix it
+        print(f"settings.toml error: {e}")
+        return True
     return not ssid or ssid == "YOUR_WIFI_SSID"
 
 
@@ -57,15 +47,24 @@ def scan_networks():
             if net.ssid and net.ssid not in seen:
                 seen.add(net.ssid)
                 networks.append((net.ssid, net.rssi))
-        wifi.radio.stop_scanning_networks()
         networks.sort(key=lambda x: x[1], reverse=True)
     except Exception as e:
         print(f"WiFi scan error: {e}")
+    finally:
+        # Always stop, or start_ap() can fail with "already scanning"
+        try:
+            wifi.radio.stop_scanning_networks()
+        except Exception:
+            pass
     return networks
 
 
-def make_qr_bitmap(data, scale=2):
-    """Generate a QR code bitmap from the given data string."""
+def make_qr_bitmap(data, scale=2, border=2):
+    """Generate a QR code bitmap with a white quiet zone of `border` modules.
+
+    Phone scanners need light space around the code; without it the code
+    blends into the black background and often won't scan.
+    """
     if not HAS_QR:
         return None, None
 
@@ -75,41 +74,51 @@ def make_qr_bitmap(data, scale=2):
 
     matrix = qr.matrix
     size = matrix.width
-    bitmap = displayio.Bitmap(size * scale, size * scale, 2)
+    full = (size + 2 * border) * scale
+    bitmap = displayio.Bitmap(full, full, 2)  # starts all 0 = white
     palette = displayio.Palette(2)
     palette[0] = WHITE
     palette[1] = BLACK
 
+    off = border * scale
     for y in range(size):
         for x in range(size):
-            color = 1 if matrix[x, y] else 0
-            for sy in range(scale):
-                for sx in range(scale):
-                    bitmap[x * scale + sx, y * scale + sy] = color
+            if matrix[x, y]:
+                px, py = off + x * scale, off + y * scale
+                for sy in range(scale):
+                    for sx in range(scale):
+                        bitmap[px + sx, py + sy] = 1
 
     return bitmap, palette
 
 
 def url_decode(encoded_string):
-    """Decode a URL-encoded string."""
-    result = []
+    """Decode a URL-encoded (form) string.
+
+    %XX escapes are UTF-8 bytes, so collect bytes and decode once at the end;
+    decoding each byte separately turns e.g. "ä" (%C3%A4) into "Ã¤".
+    """
+    out = bytearray()
     i = 0
-    while i < len(encoded_string):
+    n = len(encoded_string)
+    while i < n:
         char = encoded_string[i]
-        if char == "%" and i + 2 < len(encoded_string):
+        if char == "%" and i + 3 <= n:
             try:
-                result.append(chr(int(encoded_string[i + 1 : i + 3], 16)))
+                out.append(int(encoded_string[i + 1 : i + 3], 16))
                 i += 3
                 continue
             except ValueError:
                 pass
-        elif char == "+":
-            result.append(" ")
-            i += 1
-            continue
-        result.append(char)
+        if char == "+":
+            out.append(0x20)
+        else:
+            out.extend(char.encode("utf-8"))
         i += 1
-    return "".join(result)
+    try:
+        return bytes(out).decode("utf-8")
+    except UnicodeError:
+        return encoded_string
 
 
 def parse_form_data(body):
@@ -122,12 +131,41 @@ def parse_form_data(body):
     return params
 
 
+def html_escape(text):
+    """Escape text for safe inclusion in HTML (SSIDs are attacker-controlled)."""
+    return (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&#39;")
+    )
+
+
+def toml_escape(text):
+    """Escape a value for a TOML basic (double-quoted) string."""
+    out = []
+    for ch in text:
+        if ch == "\x00":
+            continue  # NUL can't appear in settings.toml
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch == '"':
+            out.append('\\"')
+        elif ord(ch) < 0x20 or ch == "\x7f":
+            out.append("\\u%04x" % ord(ch))
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
 def build_setup_html(networks=None):
     """Generate the WiFi setup page HTML."""
     network_options = ""
     if networks:
         for ssid, rssi in networks:
-            network_options += f'<option value="{ssid}">{ssid}</option>\n'
+            safe = html_escape(ssid)
+            network_options += f'<option value="{safe}">{safe}</option>\n'
 
     network_select = ""
     if network_options:
@@ -162,7 +200,7 @@ def build_setup_html(networks=None):
         {network_select}
         <p class="divider">or enter manually:</p>
         <input type="text" id="ssid" name="ssid" placeholder="WiFi Network Name (SSID)" required>
-        <input type="password" name="password" placeholder="WiFi Password" required>
+        <input type="password" name="password" placeholder="WiFi Password (blank for open network)">
         <button type="submit">Save and Connect</button>
     </form>
 </body>
@@ -225,18 +263,69 @@ CAPTIVE_PORTAL_PATHS = {
 }
 
 
+def _settings_key(line):
+    """Return the key of a `KEY = value` line in settings.toml, else None."""
+    stripped = line.strip()
+    if not stripped or stripped[0] in "#[":
+        return None
+    key, sep, _ = stripped.partition("=")
+    return key.strip() if sep else None
+
+
+def update_settings(text, values):
+    """Return settings.toml `text` with `values` (key -> str) set.
+
+    Existing top-level keys are replaced in place (duplicates dropped);
+    missing keys are added at the top. CircuitPython's os.getenv() stops
+    reading at the first [table] header, so keys after one are invisible and
+    left alone. All other lines and comments are kept.
+    """
+    out = []
+    done = set()
+    in_table = False
+    for line in text.splitlines():
+        if line.strip().startswith("["):
+            in_table = True
+        key = None if in_table else _settings_key(line)
+        if key in values:
+            if key not in done:
+                out.append(f'{key} = "{toml_escape(values[key])}"')
+                done.add(key)
+            continue
+        out.append(line)
+    missing = [f'{k} = "{toml_escape(v)}"' for k, v in values.items() if k not in done]
+    return "\n".join(missing + out).rstrip("\n") + "\n"
+
+
+SETTINGS_PATH = "/settings.toml"
+
+
 def save_credentials(ssid, password):
-    """Write WiFi creds to settings.toml. Returns True on success."""
-    import storage
+    """Save WiFi creds to settings.toml, keeping any other settings.
 
-    content = (
-        f'CIRCUITPY_WIFI_SSID = "{ssid}"\nCIRCUITPY_WIFI_PASSWORD = "{password}"\n'
-    )
+    Writes a temp file and renames it over settings.toml, so a power cut
+    mid-write can't leave a truncated file. If a previous save was cut off
+    after the temp file was written, its contents are recovered (boot.py
+    also restores it). Returns True on success.
+    """
     print(f"Saving: {ssid}")
-
+    tmp = SETTINGS_PATH + ".tmp"
     try:
-        with open("/settings.toml", "w") as f:
-            f.write(content)
+        text = ""
+        for path in (SETTINGS_PATH, tmp):
+            try:
+                with open(path) as f:
+                    text = f.read()
+                break
+            except OSError:
+                pass
+        text = update_settings(
+            text,
+            {"CIRCUITPY_WIFI_SSID": ssid, "CIRCUITPY_WIFI_PASSWORD": password},
+        )
+        with open(tmp, "w") as f:
+            f.write(text)
+        os.rename(tmp, SETTINGS_PATH)  # FAT VFS replaces an existing target
         print("Saved!")
         return True
     except Exception as e:
@@ -244,8 +333,77 @@ def save_credentials(ssid, password):
         return False
 
 
-def run_setup_portal(disp):
-    """Run the WiFi captive portal for configuration."""
+def _show_qr_screen(group, disp, qr_data, lines):
+    """Replace everything but the background with a QR code and text lines."""
+    while len(group) > 1:
+        group.pop()
+
+    # 3 px modules: (29 + 2*2 border) * 3 = 99 px, leaving 141 px for text.
+    # At scale 4 (132 px) the 8-char password ran into the QR code.
+    qr_bmp, qr_pal = make_qr_bitmap(qr_data, scale=3)
+    if not qr_bmp or not HAS_DISPLAY_TEXT:
+        return
+
+    qr_y = max(0, (disp.height - qr_bmp.height) // 2)
+    group.append(displayio.TileGrid(qr_bmp, pixel_shader=qr_pal, x=0, y=qr_y))
+
+    rx = (qr_bmp.width + disp.width) // 2  # center text in the space right of the QR
+    for text, y, color in lines:
+        lbl = label.Label(FONT, text=text, color=color, scale=1)
+        lbl.anchor_point = (0.5, 0.0)
+        lbl.anchored_position = (rx, y)
+        group.append(lbl)
+
+
+def _read_request(client):
+    """Read an HTTP request, including the full body per Content-Length.
+
+    Phones often send headers and the POST body in separate TCP segments,
+    so a single recv() can miss the form data.
+    """
+    buf = bytearray(1024)
+    data = b""
+    while b"\r\n\r\n" not in data and len(data) < 4096:
+        n = client.recv_into(buf)
+        if not n:
+            break
+        data += bytes(buf[:n])
+
+    head, _, body = data.partition(b"\r\n\r\n")
+    length = 0
+    for line in head.split(b"\r\n")[1:]:
+        if line.lower().startswith(b"content-length:"):
+            try:
+                length = int(line.split(b":", 1)[1].strip())
+            except ValueError:
+                pass
+    length = min(length, 4096)
+    while len(body) < length:
+        n = client.recv_into(buf)
+        if not n:
+            break
+        body += bytes(buf[:n])
+
+    return head.decode("utf-8"), body.decode("utf-8")
+
+
+def _send_html(client, html, status="200 OK"):
+    payload = html.encode("utf-8")
+    client.sendall(
+        f"HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\n"
+        f"Content-Length: {len(payload)}\r\nConnection: close\r\n\r\n".encode()
+    )
+    client.sendall(payload)
+
+
+def run_setup_portal(disp, timeout=None):
+    """Run the WiFi captive portal for configuration.
+
+    If `timeout` (seconds) is given and nobody connects to the access point
+    in that time, reboot to retry the saved credentials. Used when WiFi
+    failed at boot, e.g. because the router was still starting up.
+    """
+    started = time.monotonic()
     ap_password = generate_password()
 
     # Set up display
@@ -258,35 +416,32 @@ def run_setup_portal(disp):
     bg_pal[0] = BLACK
     group.append(displayio.TileGrid(bg, pixel_shader=bg_pal))
 
-    # Show QR code for WiFi connection
-    wifi_qr = f"WIFI:T:WPA;S:{AP_SSID};P:{ap_password};;"
-    qr_bmp, qr_pal = make_qr_bitmap(wifi_qr, scale=4)
-
-    if qr_bmp and HAS_DISPLAY_TEXT:
-        qr_y = (disp.height - qr_bmp.height) // 2
-        group.append(displayio.TileGrid(qr_bmp, pixel_shader=qr_pal, x=10, y=qr_y))
-
-        rx = disp.width - 60
-
-        def add_lbl(txt, y, color, scale=1):
-            lbl = label.Label(FONT, text=txt, color=color, scale=scale)
-            lbl.anchor_point = (0.5, 0.0)
-            lbl.anchored_position = (rx, y)
-            group.append(lbl)
-
-        add_lbl("WiFi Setup", 5, ACCENT, 1)
-        add_lbl("Scan QR", 28, WHITE)
-        add_lbl("to connect", 46, WHITE)
-        add_lbl("or", 68, GRAY)
-        add_lbl(AP_SSID, 88, ACCENT)
-        add_lbl(ap_password, 106, WHITE)
+    # Show QR code for joining the setup access point
+    _show_qr_screen(
+        group,
+        disp,
+        f"WIFI:T:WPA;S:{AP_SSID};P:{ap_password};;",
+        (
+            ("WiFi Setup", 5, ACCENT),
+            ("Scan QR", 28, WHITE),
+            ("to connect", 46, WHITE),
+            ("or", 68, GRAY),
+            (AP_SSID, 88, ACCENT),
+            (ap_password, 106, WHITE),
+        ),
+    )
 
     # Scan networks and start access point
     networks = scan_networks()
     setup_html = build_setup_html(networks)
 
-    wifi.radio.stop_station()
-    wifi.radio.start_ap(ssid=AP_SSID, password=ap_password)
+    try:
+        wifi.radio.stop_station()
+        wifi.radio.start_ap(ssid=AP_SSID, password=ap_password)
+    except Exception as e:
+        print(f"Could not start access point: {e}")
+        time.sleep(5)
+        microcontroller.reset()
     print(f"AP: {AP_SSID} @ {wifi.radio.ipv4_address_ap}")
 
     # Start HTTP server
@@ -300,98 +455,78 @@ def run_setup_portal(disp):
     client_seen = False
 
     def show_portal_qr():
-        """Switch display to show portal URL QR after client connects."""
+        """Switch display to show portal URL QR after a client connects."""
         nonlocal client_seen
         if client_seen:
             return
         client_seen = True
-
-        while len(group) > 1:
-            group.pop()
-
-        url_qr = f"http://{AP_IP}/setup"
-        qr2, pal2 = make_qr_bitmap(url_qr, scale=4)
-        if qr2 and HAS_DISPLAY_TEXT:
-            qr_y = (disp.height - qr2.height) // 2
-            group.append(displayio.TileGrid(qr2, pixel_shader=pal2, x=10, y=qr_y))
-
-            rx = disp.width - 60
-
-            def add_lbl(txt, y, color, scale=1):
-                lbl = label.Label(FONT, text=txt, color=color, scale=scale)
-                lbl.anchor_point = (0.5, 0.0)
-                lbl.anchored_position = (rx, y)
-                group.append(lbl)
-
-            add_lbl("Connected!", 5, ACCENT, 1)
-            add_lbl("Scan QR", 28, WHITE)
-            add_lbl("to open", 46, WHITE)
-            add_lbl("setup page", 64, WHITE)
-            add_lbl("-- or --", 86, GRAY)
-            add_lbl(AP_IP, 106, ACCENT)
+        _show_qr_screen(
+            group,
+            disp,
+            f"http://{AP_IP}/setup",
+            (
+                ("Connected!", 5, ACCENT),
+                ("Scan QR", 28, WHITE),
+                ("to open", 46, WHITE),
+                ("setup page", 64, WHITE),
+                ("-- or --", 86, GRAY),
+                (AP_IP, 106, ACCENT),
+            ),
+        )
 
     # Server loop
     while True:
+        if timeout and not client_seen and time.monotonic() - started > timeout:
+            print("Setup portal timed out, rebooting to retry WiFi")
+            microcontroller.reset()
+
         if not client_seen:
             try:
                 if wifi.radio.stations_ap:
                     show_portal_qr()
-            except:
+            except Exception:
                 pass
 
         try:
-            client, addr = sock.accept()
+            client, _ = sock.accept()
+        except OSError as e:
+            if e.errno != 11:  # EAGAIN: no pending connection
+                print(f"Server error: {e}")
+            time.sleep(0.1)
+            continue
+
+        reboot = False
+        try:
             client.setblocking(True)
             client.settimeout(5.0)
             show_portal_qr()
 
-            buf = bytearray(4096)
-            try:
-                n = client.recv_into(buf)
-                req = buf[:n].decode("utf-8")
+            head, body = _read_request(client)
+            parts = head.split("\r\n", 1)[0].split(" ")
+            method = parts[0] if parts else ""
+            path = parts[1].split("?", 1)[0] if len(parts) > 1 else "/"
 
-                first_line = req.split("\r\n")[0]
-                parts = first_line.split(" ")
-                if len(parts) >= 2:
-                    method, path = parts[0], parts[1]
+            if path in CAPTIVE_PORTAL_PATHS or path == "/":
+                client.sendall(
+                    f"HTTP/1.1 302 Found\r\nLocation: http://{AP_IP}/setup\r\n"
+                    "Content-Length: 0\r\nConnection: close\r\n\r\n".encode()
+                )
+            elif method == "POST" and path == "/save":
+                params = parse_form_data(body)
+                ssid = params.get("ssid", "").strip()
+                if ssid:
+                    ok = save_credentials(ssid, params.get("password", ""))
+                    _send_html(client, SUCCESS_HTML if ok else ERROR_HTML)
+                    reboot = ok
+                else:
+                    _send_html(client, setup_html)
+            else:
+                _send_html(client, setup_html)
+        except Exception as e:
+            print(f"Request error: {e}")
+        finally:
+            client.close()
 
-                    if path in CAPTIVE_PORTAL_PATHS or path == "/":
-                        resp = f"HTTP/1.1 302 Found\r\nLocation: http://{AP_IP}/setup\r\nContent-Length: 0\r\n\r\n"
-                        client.send(resp.encode())
-
-                    elif path == "/setup":
-                        resp = f"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {len(setup_html)}\r\n\r\n{setup_html}"
-                        client.sendall(resp.encode())
-
-                    elif method == "POST" and path == "/save":
-                        body_start = req.find("\r\n\r\n")
-                        if body_start > 0:
-                            body = req[body_start + 4 :]
-                            params = parse_form_data(body)
-                            ssid = params.get("ssid", "")
-                            pw = params.get("password", "")
-
-                            if ssid:
-                                ok = save_credentials(ssid, pw)
-                                html = SUCCESS_HTML if ok else ERROR_HTML
-                                resp = f"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {len(html)}\r\n\r\n{html}"
-                                client.sendall(resp.encode())
-                                client.close()
-                                if ok:
-                                    time.sleep(1)
-                                    microcontroller.reset()
-                                continue
-                    else:
-                        resp = f"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {len(setup_html)}\r\n\r\n{setup_html}"
-                        client.sendall(resp.encode())
-
-            except Exception as e:
-                print(f"Request error: {e}")
-            finally:
-                client.close()
-
-        except OSError as e:
-            if e.errno != 11:
-                print(f"Server error: {e}")
-
-        time.sleep(0.1)
+        if reboot:
+            time.sleep(1)
+            microcontroller.reset()

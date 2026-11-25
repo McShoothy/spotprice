@@ -3,11 +3,11 @@ SpotPrice Display
 =================
 Real-time Finnish electricity spot price monitor for ESP32-S3 TFT Feather.
 
-Displays current prices with color-coded background and a 24-hour forecast graph.
+Displays current prices with color-coded background and 8h/24h forecast graphs.
 Includes WiFi captive portal for easy configuration.
 
 Hardware: Adafruit ESP32-S3 TFT Feather
-    - D0: Mode button (toggle price/graph view)
+    - D0: Mode button (cycle price / 8h graph / 24h graph)
     - D0 held during boot: Enable USB drive for development
 
 Author: Sam
@@ -17,6 +17,7 @@ Repository: https://github.com/McShoothy/spotprice
 
 import gc
 import time
+import random
 import ssl
 import os
 import rtc
@@ -27,26 +28,46 @@ import digitalio
 import adafruit_requests
 import adafruit_ntp
 
-# Import from spotprice module
+try:
+    import adafruit_connection_manager
+except ImportError:
+    adafruit_connection_manager = None
+
 from spotprice import (
     display,
     init_display,
     show_price,
     show_graph,
     show_status,
+    show_message,
     set_title,
+    parse_prices,
     find_current_price,
-    get_upcoming_prices,
     get_prices_with_history,
     needs_wifi_setup,
     run_setup_portal,
+    plan_next_fetch,
+    parse_http_date,
     API_URL,
     RETRY_INTERVAL,
+    RETRY_MAX,
+    PUBLISH_LOCAL,
+    FETCH_JITTER,
+    FAST_UNTIL_LOCAL,
+    GIVE_UP_LOCAL,
+    RETRY_FAST,
+    RETRY_SLOW,
     GRAPH_SLOTS_8H,
     GRAPH_SLOTS_24H,
-    DISPLAY_REFRESH,
-    FETCH_HOURS,
+    GRAPH_PAST_8H,
+    GRAPH_PAST_24H,
 )
+
+SLOT_SECONDS = 15 * 60
+CLOCK_VALID_AFTER = 1700000000  # RTC is still near 2000-01-01 until NTP works
+NUM_VIEWS = 3  # 0 = price, 1 = 8h graph, 2 = 24h graph
+BOOT_CONNECT_TRIES = 5  # WiFi attempts at boot before opening the setup portal
+PORTAL_TIMEOUT = 10 * 60  # Reboot from the portal to retry saved WiFi after this
 
 # Hardware
 btn_mode = digitalio.DigitalInOut(board.D0)
@@ -54,34 +75,46 @@ btn_mode.direction = digitalio.Direction.INPUT
 btn_mode.pull = digitalio.Pull.UP
 
 
+def log_memory(label=""):
+    """Log current memory usage for debugging."""
+    gc.collect()
+    free = gc.mem_free()
+    alloc = gc.mem_alloc()
+    total = free + alloc
+    print(f"[MEM {label}] Free: {free//1024}KB / {total//1024}KB ({100*free//total}%)")
+
+
 def main():
     """Main application entry point."""
 
-    # Check if WiFi setup is needed
     if needs_wifi_setup():
         run_setup_portal(display)
         return
 
-    # Normal operation
     init_display()
-    show_status("Connecting...")
+    show_message("Connecting...")
 
-    # Connect to WiFi
     ssid = os.getenv("CIRCUITPY_WIFI_SSID")
-    try:
-        wifi.radio.connect(ssid, os.getenv("CIRCUITPY_WIFI_PASSWORD"))
-        show_status("WiFi OK")
-    except Exception as e:
-        print(f"WiFi connection failed: {e}")
-        show_status("WiFi failed")
+    password = os.getenv("CIRCUITPY_WIFI_PASSWORD")
+    # Retry a few times: after a power cut the router may still be booting
+    for attempt in range(1, BOOT_CONNECT_TRIES + 1):
+        try:
+            wifi.radio.connect(ssid, password)
+            show_message("WiFi connected")
+            break
+        except Exception as e:
+            print(f"WiFi connection failed ({attempt}/{BOOT_CONNECT_TRIES}): {e}")
+            show_message("Connecting...", f"retry {attempt}/{BOOT_CONNECT_TRIES}")
+            time.sleep(min(5 * attempt, 20))
+    else:
+        show_message("WiFi failed", "opening setup")
         time.sleep(2)
-        run_setup_portal(display)
+        # Saved credentials exist, so time out and retry them later
+        run_setup_portal(display, timeout=PORTAL_TIMEOUT)
         return
 
-    # Initialize network session
     pool = socketpool.SocketPool(wifi.radio)
-    ssl_context = ssl.create_default_context()
-    http = adafruit_requests.Session(pool, ssl_context)
+    http = adafruit_requests.Session(pool, ssl.create_default_context())
 
     def wifi_on():
         """Enable WiFi (reconnect if needed)."""
@@ -89,166 +122,156 @@ def main():
             wifi.radio.enabled = True
             time.sleep(0.5)
         if not wifi.radio.connected:
-            try:
-                wifi.radio.connect(ssid, os.getenv("CIRCUITPY_WIFI_PASSWORD"))
-            except Exception as e:
-                print(f"WiFi reconnect failed: {e}")
+            wifi.radio.connect(ssid, password)
 
     def wifi_off():
-        """Disable WiFi to save power."""
+        """Disable WiFi to save power.
+
+        Close pooled (keep-alive) sockets first; otherwise the next fetch
+        reuses a dead TLS socket and can hang until the request times out.
+        """
+        if adafruit_connection_manager:
+            try:
+                adafruit_connection_manager.connection_manager_close_all(pool)
+            except Exception as e:
+                print(f"Socket cleanup failed: {e}")
         wifi.radio.enabled = False
 
-    # Synchronize time via NTP
-    show_status("Syncing time...")
-    try:
-        ntp = adafruit_ntp.NTP(pool, tz_offset=0)
-        rtc.RTC().datetime = ntp.datetime
-        show_status("Time OK")
-    except Exception as e:
-        print(f"NTP sync failed: {e}")
-        show_status("Time error")
+    def sync_time():
+        """Set the RTC from NTP (UTC). Re-run on every fetch to correct drift."""
+        try:
+            rtc.RTC().datetime = adafruit_ntp.NTP(pool, tz_offset=0).datetime
+            return True
+        except Exception as e:
+            print(f"NTP sync failed: {e}")
+            return False
 
-    # Application state
-    view_mode = 0  # 0 = price, 1 = 8h graph, 2 = 24h graph
-    price_data = None
-    last_fetch_time = 0
-    last_display_refresh = 0
-    last_price_shown = None
-    last_gc_time = 0
-
-    def log_memory(label=""):
-        """Log current memory usage for debugging."""
-        gc.collect()
-        free = gc.mem_free()
-        alloc = gc.mem_alloc()
-        total = free + alloc
-        print(
-            f"[MEM {label}] Free: {free//1024}KB / {total//1024}KB ({100*free//total}%)"
-        )
+    def time_from_http(response):
+        """Fallback when NTP is blocked: set the RTC from the HTTP Date header."""
+        headers = response.headers
+        ts = parse_http_date(headers.get("date") or headers.get("Date") or "")
+        if ts > CLOCK_VALID_AFTER:
+            rtc.RTC().datetime = time.localtime(ts)
+            print("Clock set from HTTP Date header")
 
     def fetch_prices():
-        """Fetch price data from API with proper cleanup."""
-        nonlocal price_data
-
+        """Sync time and fetch prices. Returns parsed slots or None."""
         response = None
         try:
             wifi_on()
+            ntp_ok = sync_time()
             response = http.get(API_URL)
-            new_data = response.json()
-
-            # Explicitly clear old data before assigning new
-            if price_data is not None:
-                price_data.clear()
-                price_data = None
-            gc.collect()
-
-            price_data = new_data
-            return True
+            if response.status_code != 200:  # e.g. 429 rate limit
+                raise OSError(f"HTTP {response.status_code}")
+            if not ntp_ok and time.time() < CLOCK_VALID_AFTER:
+                time_from_http(response)
+            data = response.json()
+            slots = parse_prices(data["prices"])
+            data = None
+            return slots
         except Exception as e:
             print(f"Fetch error: {e}")
-            return False
+            return None
         finally:
-            # Always clean up response
             if response is not None:
                 try:
                     response.close()
                 except Exception:
                     pass
-                response = None
             wifi_off()
             gc.collect()
 
+    # Per-device random offset so many devices don't all fetch at 14:05:00
+    jitter = random.randint(0, FETCH_JITTER)
+
+    # Application state
+    view_mode = 0
+    slots = None
+    next_fetch = 0  # fetch immediately
+    retry_delay = RETRY_INTERVAL
+    next_slot_boundary = 0
+    btn_was_pressed = False
+
     def refresh_display():
         """Update the display based on current mode and data."""
-        nonlocal last_price_shown
-
-        if not price_data or "prices" not in price_data:
+        if not slots:
+            return
+        if view_mode == 0:
+            price = find_current_price(slots)
+            set_title("Hinta nyt:")
+            show_price(price)  # None shows a full-screen message
             return
 
-        prices = price_data["prices"]
-
-        if view_mode == 0:
-            # Current price view
-            current_price = find_current_price(prices)
-            if current_price is not None:
-                set_title("Hinta nyt:")
-                show_price(current_price)
-                last_price_shown = current_price
-        elif view_mode == 1:
-            # 8-hour graph (30min past + 7.5h future = 8h total)
+        if view_mode == 1:
             set_title("8H")
-            price_list, now_idx = get_prices_with_history(
-                prices, future_slots=30, past_slots=2
-            )
-            show_graph(price_list, now_idx)
+            total, past = GRAPH_SLOTS_8H, GRAPH_PAST_8H
         else:
-            # 24-hour graph (1h past + 23h future = 24h total)
             set_title("24H")
-            price_list, now_idx = get_prices_with_history(
-                prices, future_slots=92, past_slots=4
-            )
-            show_graph(price_list, now_idx)
+            total, past = GRAPH_SLOTS_24H, GRAPH_PAST_24H
+        price_list, now_idx, first_start = get_prices_with_history(
+            slots, future_slots=total - past, past_slots=past
+        )
+        show_graph(price_list, now_idx, first_start)
 
-    # Main loop
     while True:
-        current_time = time.time()
+        now = time.time()
 
-        # Handle mode button
-        if not btn_mode.value:
-            view_mode = (view_mode + 1) % 3
+        # Mode button: act on press edge only, so holding it doesn't spin views
+        pressed = not btn_mode.value
+        if pressed and not btn_was_pressed:
+            view_mode = (view_mode + 1) % NUM_VIEWS
             refresh_display()
-            time.sleep(0.2)
+        btn_was_pressed = pressed
 
-        # Check if it's time to fetch
-        now_struct = time.localtime(current_time)
-        current_hour = now_struct.tm_hour
-        current_min = now_struct.tm_min
-
-        should_fetch = price_data is None
-        if not should_fetch and last_fetch_time > 0:
-            hours_since_fetch = (current_time - last_fetch_time) / 3600
-            if hours_since_fetch >= 1:
-                for fetch_hour in FETCH_HOURS:
-                    if current_hour == fetch_hour and current_min <= 5:
-                        should_fetch = True
-                        break
-                    if current_hour == fetch_hour and current_min >= 55:
-                        should_fetch = True
-                        break
-
-        if should_fetch:
-            show_status("Fetching prices...")
-            if fetch_prices():
-                last_fetch_time = current_time
-                last_display_refresh = current_time
-
-                if price_data and "prices" in price_data:
-                    count = len(price_data["prices"])
-                    print(
-                        f"Cached {count} price entries at {current_hour:02d}:{current_min:02d}"
-                    )
-                    log_memory("after fetch")
-
-                refresh_display()
-                show_status("")
+        if now >= next_fetch:
+            if slots:
+                show_status("Updating...")  # keep showing current prices
             else:
-                show_status("Error")
-                last_fetch_time = current_time - 3600 + RETRY_INTERVAL
+                show_message("Fetching prices...")
+            new_slots = fetch_prices()
+            now = time.time()  # clock may have jumped after NTP sync
+            if new_slots:
+                slots = None
+                gc.collect()
+                slots = new_slots
+                if now < CLOCK_VALID_AFTER:
+                    # No valid clock (NTP and HTTP Date both failed): can't
+                    # tell which prices are current. Back off, don't hammer.
+                    next_fetch = now + retry_delay
+                    retry_delay = min(retry_delay * 2, RETRY_MAX)
+                else:
+                    retry_delay = RETRY_INTERVAL
+                    next_fetch = plan_next_fetch(
+                        now,
+                        slots[-1][1],
+                        PUBLISH_LOCAL,
+                        FAST_UNTIL_LOCAL,
+                        GIVE_UP_LOCAL,
+                        RETRY_FAST,
+                        RETRY_SLOW,
+                        jitter,
+                    )
+                print(
+                    f"Cached {len(slots)} slots, next fetch in {(next_fetch - now) // 60} min"
+                )
+                log_memory("after fetch")
+                show_status("")
+                refresh_display()
+                next_slot_boundary = now - now % SLOT_SECONDS + SLOT_SECONDS
+            else:
+                if slots:
+                    show_status("Update failed")
+                else:
+                    show_message("Fetch failed", f"retrying in {retry_delay} s")
+                next_fetch = now + retry_delay
+                retry_delay = min(retry_delay * 2, RETRY_MAX)
 
-        elif (current_time - last_display_refresh) > DISPLAY_REFRESH:
-            last_display_refresh = current_time
+        elif slots and now >= next_slot_boundary:
+            # New 15-minute price slot started
+            next_slot_boundary = now - now % SLOT_SECONDS + SLOT_SECONDS
+            refresh_display()
 
-            if price_data and "prices" in price_data:
-                current_price = find_current_price(price_data["prices"])
-                if current_price != last_price_shown:
-                    refresh_display()
-
-        # Periodic garbage collection (every 5 minutes)
-        if (current_time - last_gc_time) > 300:
-            last_gc_time = current_time
-            gc.collect()
-
-        time.sleep(0.1)
+        time.sleep(0.05)
 
 
 if __name__ == "__main__":

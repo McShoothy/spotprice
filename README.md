@@ -42,7 +42,7 @@ chmod +x install.sh
 - **Real-time price display** with color-coded background (green = cheap, red = expensive)
 - **8-hour and 24-hour forecast graphs** with smooth curves and 15-minute resolution
 - **15-minute price resolution** - tracks Finnish Fingrid's quarter-hourly pricing
-- **Smart caching** fetches 48 hours of prices just 3 times per day (00:01, 07:59, 15:59)
+- **Smart fetching** gets tomorrow's prices once a day, right after they're published (~14:05 Finnish time), retrying if Nord Pool is late
 - **Power optimized** - WiFi disabled between fetches, adjustable display brightness
 - **WiFi captive portal** for easy setup without editing config files
 - **QR code setup** - scan to connect and configure
@@ -71,11 +71,36 @@ chmod +x install.sh
 |--------------|---------------|--------------|
 | ![Price Display](images/price_display.jpeg) ![Price Display](images/price_display1.jpeg) | ![Forecast](images/forecast.jpeg)![Forecast](images/forecast8.jpeg) | ![Setup](images/connect-to-wifi1.jpeg) ![Setup](images/setup.jpeg) |
 
+## Screenshots
+
+Captured pixel-for-pixel from the display itself (shown at 2×).
+
+**Price view**: the background colour shows the price level.
+
+| Negative | Cheap | Mid | Expensive |
+|:---:|:---:|:---:|:---:|
+| ![Negative price on blue](images/screen-price-negative.png) | ![Cheap price on green](images/screen-price-green.png) | ![Mid price on yellow](images/screen-price-yellow.png) | ![Expensive price on red](images/screen-price-red.png) |
+| −1.2 c/kWh | 0.60 c/kWh | 7.5 c/kWh | 15.4 c/kWh |
+
+**Forecast graphs**: real prices from 5 March 2026, a day that starts green overnight, climbs to red morning and evening peaks, and drops back to green.
+
+| 24H | 8H |
+|:---:|:---:|
+| ![24-hour forecast graph](images/screen-graph-24h.png) | ![8-hour forecast graph](images/screen-graph-8h.png) |
+| 02:00 → 02:00 the next day | The morning climb, 04:00 → 12:00 |
+
+**WiFi setup**: shown on first boot (or when WiFi fails). Scan the first code to join the device's own network, then the second to open the setup page.
+
+| 1. Join the setup network | 2. Open the setup page |
+|:---:|:---:|
+| ![QR code to join the SpotPrice network](images/screen-setup-join-wifi.png) | ![QR code to open the setup page](images/screen-setup-open-page.png) |
+| The password is random on every boot | Appears once your phone has connected |
+
 ## Installation
 
 ### 1. Install CircuitPython
 
-Download and install CircuitPython 9.x for the ESP32-S3 TFT Feather from:
+Download and install CircuitPython 10.x for the ESP32-S3 TFT Feather from:
 https://circuitpython.org/board/adafruit_feather_esp32s3_tft/
 
 ### 2. Quick Install (Recommended)
@@ -102,7 +127,7 @@ If you prefer to install manually:
 python3 -m venv venv
 source venv/bin/activate
 pip install circup
-circup install --auto
+circup install adafruit_requests adafruit_connection_manager adafruit_ntp adafruit_ticks adafruit_display_text adafruit_bitmap_font adafruit_miniqr
 ```
 
 **Or manually copy these libraries** from the [Adafruit CircuitPython Bundle](https://circuitpython.org/libraries) to the `/lib` folder:
@@ -122,7 +147,8 @@ CIRCUITPY/
     boot.py
     main.py
     spotprice/        (folder)
-    font.bdf          (optional, custom font)
+    font.pcf          (UI font)
+    price.pcf         (large price digits)
     settings.toml     (created automatically during setup)
     lib/
         (libraries listed above)
@@ -136,7 +162,7 @@ There are two ways to configure WiFi credentials:
 
 1. Power on the device
 2. If no WiFi is configured, the device automatically enters setup mode
-3. The device creates a WiFi network named "SpotPrice-Setup"
+3. The device creates a WiFi network named "SpotPrice"
 4. Scan the QR code on screen or connect manually (password shown on display)
 5. A setup page will open automatically in your browser (if not scan the new QR code on the screen)
 6. Select your home WiFi network and enter the password
@@ -182,7 +208,8 @@ Shows the current electricity price in cents per kWh. The background color indic
 | Blue | Negative (you get paid!) |
 | Green | Below 1 c/kWh |
 | Light Green | 1-3 c/kWh |
-| Yellow/Orange | 3-13 c/kWh (gradient) |
+| Light green → Yellow | 3-8 c/kWh (gradient) |
+| Yellow → Red | 8-13 c/kWh (gradient) |
 | Red | Above 13 c/kWh |
 
 **8-Hour Forecast (Mode 2)**
@@ -205,10 +232,12 @@ The filled area under the curve uses darker shades of the same colors. A white m
 Edit the constants in `spotprice/config.py` to customize behavior:
 
 ```python
-# Fetch schedule (hours in UTC)
-FETCH_HOURS = [0, 7, 15]  # Fetch at 00:01, 07:59, 15:59
-RETRY_INTERVAL = 30       # Retry after 30 seconds on error
-DISPLAY_REFRESH = 120     # Check for price changes every 2 minutes
+# Fetch schedule, (hour, minute) in Finnish local time (DST handled)
+PUBLISH_LOCAL = (14, 5)      # Daily fetch, plus a random 0-10 min per device
+FAST_UNTIL_LOCAL = (15, 30)  # If tomorrow is missing, retry every 15 min until here...
+GIVE_UP_LOCAL = (22, 0)      # ...then every 45 min until here
+RETRY_INTERVAL = 30          # Failed request: retry after 30 s, doubling...
+RETRY_MAX = 15 * 60          # ...up to 15 minutes
 
 # Power saving
 DISPLAY_BRIGHTNESS = 0.5  # 0.0-1.0 (lower = less power, 0.3 recommended for battery)
@@ -216,6 +245,8 @@ DISPLAY_BRIGHTNESS = 0.5  # 0.0-1.0 (lower = less power, 0.3 recommended for bat
 # Forecast settings
 GRAPH_SLOTS_8H = 32       # Number of 15-min slots for 8-hour view
 GRAPH_SLOTS_24H = 96      # Number of 15-min slots for 24-hour view
+GRAPH_PAST_8H = 2         # Slots shown before "now" on each graph
+GRAPH_PAST_24H = 4
 
 # Price thresholds (cents/kWh)
 PRICE_LOW = 1.0           # Below this = bright green
@@ -228,9 +259,9 @@ PRICE_MAX = 13.0          # Above this = red background
 
 The device implements several power-saving strategies for battery operation:
 
-1. **WiFi disabled between fetches** - Radio is only enabled during API calls (a few seconds every 12 hours)
+1. **WiFi disabled between fetches** - Radio is only enabled during API calls (a few seconds, usually once a day)
 2. **Reduced display brightness** - Default 50%, lower for longer battery life
-3. **Infrequent display refresh** - Checks every 2 minutes instead of continuously
+3. **Minimal redraws** - The screen only redraws when a new 15-minute slot starts or a button is pressed
 
 For maximum battery life, set `DISPLAY_BRIGHTNESS = 0.3`.
 
@@ -242,10 +273,12 @@ This project uses the [Porssisahko API](https://porssisahko.net/) for Finnish el
 
 **Caching Strategy:**
 - The API returns 48 hours of 15-minute price slots (~192 entries)
-- The device fetches new data 3 times per day at 00:01, 07:59, and 15:59
+- Nord Pool publishes tomorrow's prices around 14:00 Finnish time, and porssisahko.net has them "from 14:00"
+- The device fetches at boot, then once a day at about 14:05-14:15 (a random offset per device avoids everyone hitting the API at the same second); the clock is re-synced via NTP on each fetch
+- If tomorrow's prices aren't there yet (Nord Pool delays happen), it retries every 15 min until 15:30, then every 45 min until 22:00. Today's prices last until 01:00, after which it retries every 15 min
 - WiFi is disabled between fetches to save power
 - Prices are cached in memory and used for display updates
-- Display refreshes every 2 minutes to detect new 15-minute price slots
+- The display updates at each 15-minute slot boundary; graph hour labels are shown in Finnish local time
 
 ## Project Structure
 
@@ -254,16 +287,44 @@ esp32-s3/
     boot.py           # Filesystem config (hold D0 during boot for USB access)
     main.py           # Main application entry point
     settings.toml     # WiFi credentials (auto-generated)
-    font.bdf          # Custom font (optional)
+    font.pcf          # UI font
+    price.pcf         # Large price font
     spotprice/        # Application modules
         __init__.py   # Package exports
         config.py     # Configuration constants
         display.py    # Display rendering (price view, graph)
-        prices.py     # Price data parsing
+        fonts.py      # Shared font loading
+        prices.py     # Price parsing and Finnish local time
         wifi_portal.py # Captive portal for WiFi setup
     lib/              # CircuitPython libraries
     images/           # Documentation images
+    tools/
+        make_font.py  # Render TTF/OTF to crisp bitmap fonts at exact sizes
+        strip_font.py # Shrink a BDF font to ASCII and convert to PCF
+        fonts/        # League Spartan source font + license
 ```
+
+### Fonts
+
+The display uses fonts rendered from [League Spartan](https://github.com/theleagueof/league-spartan) (SIL Open Font License, source in `tools/fonts/`):
+
+| File | Size | Used for |
+|------|------|----------|
+| `font.pcf` | 22 px, ASCII | Titles, labels, graph axes |
+| `price.aa` | 96 px, digits only, anti-aliased | The big current price |
+| `price.pcf` | 96 px, digits only | Fallback for the price if `price.aa` is missing |
+
+Bitmap fonts can only be enlarged by whole-pixel multiples, which makes scaled-up text blocky, so the price gets its own natively rendered font. CircuitPython bitmap fonts are also 1-bit (no smooth edges), so the price digits additionally ship as `price.aa`: greyscale glyphs with 4 shades, drawn by `spotprice/aatext.py` with the edge shades blended into the current background colour.
+
+To regenerate or try another typeface (needs `pip install freetype-py` and `bdftopcf`):
+
+```bash
+python3 tools/make_font.py "tools/fonts/LeagueSpartan[wght].ttf" 22 font.pcf
+python3 tools/make_font.py "tools/fonts/LeagueSpartan[wght].ttf" 96 price.pcf --chars "0123456789.-"
+python3 tools/make_font.py "tools/fonts/LeagueSpartan[wght].ttf" 96 price.aa --chars "0123456789.-"
+```
+
+`--levels` sets the number of shades in `price.aa` (default 4; higher is smoother). If neither price font is present, the price falls back to the small font scaled up.
 
 ## Troubleshooting
 
@@ -297,7 +358,7 @@ NTP sync failed. Check your internet connection. The device will retry on the ne
 
 ### Prices not updating
 
-The API may be temporarily unavailable. The device will retry every 5 minutes on error. Normal operation only fetches new data every 12 hours since the API returns 48 hours of prices.
+The API may be temporarily unavailable. The device retries after 30 seconds, backing off up to every 15 minutes, and keeps showing cached prices meanwhile.
 
 ## Development
 

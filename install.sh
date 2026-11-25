@@ -54,7 +54,7 @@ find_device() {
 }
 
 # Step 1: Create virtual environment
-echo -e "${YELLOW}[1/4]${NC} Setting up Python virtual environment..."
+echo -e "${YELLOW}[1/5]${NC} Setting up Python virtual environment..."
 if [ ! -d "$SCRIPT_DIR/venv" ]; then
     python3 -m venv "$SCRIPT_DIR/venv"
     echo -e "  ${GREEN}✓${NC} Created venv"
@@ -63,14 +63,14 @@ else
 fi
 
 # Step 2: Install circup
-echo -e "${YELLOW}[2/4]${NC} Installing circup..."
+echo -e "${YELLOW}[2/5]${NC} Installing circup..."
 source "$SCRIPT_DIR/venv/bin/activate"
 pip install --quiet --upgrade circup
 echo -e "  ${GREEN}✓${NC} circup installed"
 
 # Step 3: Find device
-echo -e "${YELLOW}[3/4]${NC} Looking for CircuitPython device..."
-DEVICE_PATH=$(find_device)
+echo -e "${YELLOW}[3/5]${NC} Looking for CircuitPython device..."
+DEVICE_PATH=$(find_device || true)
 
 if [ -z "$DEVICE_PATH" ]; then
     echo -e "  ${RED}✗${NC} No CircuitPython device found!"
@@ -87,7 +87,7 @@ fi
 echo -e "  ${GREEN}✓${NC} Found device at: $DEVICE_PATH"
 
 # Step 4: Copy project files
-echo -e "${YELLOW}[4/4]${NC} Copying files to device..."
+echo -e "${YELLOW}[4/5]${NC} Copying files to device..."
 
 # Copy main files
 cp "$SCRIPT_DIR/boot.py" "$DEVICE_PATH/"
@@ -103,37 +103,50 @@ if [ -d "$SCRIPT_DIR/spotprice" ]; then
     echo -e "  ${GREEN}✓${NC} spotprice/"
 fi
 
-# Copy font if exists
-# Copy font files if they exist
-if [ -f "$SCRIPT_DIR/font.bdf" ]; then
+# Copy fonts (PCF preferred: loads much faster; see tools/make_font.py)
+if [ -f "$SCRIPT_DIR/price.aa" ]; then
+    cp "$SCRIPT_DIR/price.aa" "$DEVICE_PATH/"
+    echo -e "  ${GREEN}✓${NC} price.aa (anti-aliased price digits)"
+fi
+if [ -f "$SCRIPT_DIR/price.pcf" ]; then
+    cp "$SCRIPT_DIR/price.pcf" "$DEVICE_PATH/"
+    echo -e "  ${GREEN}✓${NC} price.pcf"
+fi
+
+if [ -f "$SCRIPT_DIR/font.pcf" ]; then
+    cp "$SCRIPT_DIR/font.pcf" "$DEVICE_PATH/"
+    echo -e "  ${GREEN}✓${NC} font.pcf"
+elif [ -f "$SCRIPT_DIR/font.bdf" ]; then
     cp "$SCRIPT_DIR/font.bdf" "$DEVICE_PATH/"
     echo -e "  ${GREEN}✓${NC} font.bdf"
+else
+    echo -e "  ${YELLOW}!${NC} No font.pcf/font.bdf found (will use default terminal font)"
 fi
 
-if [ -f "$SCRIPT_DIR/font.bmp" ]; then
-    cp "$SCRIPT_DIR/font.bmp" "$DEVICE_PATH/"
-    echo -e "  ${GREEN}✓${NC} font.bmp"
-fi
-
-if [ ! -f "$SCRIPT_DIR/font.bdf" ] && [ ! -f "$SCRIPT_DIR/font.bmp" ]; then
-    echo -e "  ${YELLOW}!${NC} No custom font found (will use default terminal font)"
-fi
-
-# Copy settings.toml template if no settings exist
+# Copy settings.toml if the device has none (never overwrite saved WiFi creds)
 if [ ! -f "$DEVICE_PATH/settings.toml" ]; then
     if [ -f "$SCRIPT_DIR/settings.toml" ]; then
-        cp "$SCRIPT_DIR/settings.toml" "$DEVICE_PATH/"
-        echo -e "  ${GREEN}✓${NC} settings.toml (template)"
+        cp "$SCRIPT_DIR/settings.toml" "$DEVICE_PATH/settings.toml"
+        echo -e "  ${GREEN}✓${NC} settings.toml"
+    elif [ -f "$SCRIPT_DIR/settings.toml.example" ]; then
+        cp "$SCRIPT_DIR/settings.toml.example" "$DEVICE_PATH/settings.toml"
+        echo -e "  ${GREEN}✓${NC} settings.toml (from example)"
     fi
 fi
 
 # Step 5: Install CircuitPython libraries
-echo
+# Listed explicitly: circup's --auto only scans main.py, not the spotprice/ package.
 echo -e "${YELLOW}[5/5]${NC} Installing CircuitPython libraries with circup..."
-circup install --auto
+circup --path "$DEVICE_PATH" install \
+    adafruit_requests \
+    adafruit_connection_manager \
+    adafruit_ntp \
+    adafruit_ticks \
+    adafruit_display_text \
+    adafruit_bitmap_font \
+    adafruit_miniqr
 echo -e "  ${GREEN}✓${NC} Libraries installed"
 
-# Done!
 echo
 echo -e "${GREEN}════════════════════════════════════════${NC}"
 echo -e "${GREEN}   Installation complete!${NC}"

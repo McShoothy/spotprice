@@ -83,6 +83,9 @@ sd/*
 *.seed
 *.pid.lock
 
+# CircuitPython settings hold WiFi credentials (keep the example)
+settings.toml
+
 # Environment variables (keep example)
 .env
 .env.local
